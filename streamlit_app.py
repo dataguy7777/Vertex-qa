@@ -24,26 +24,27 @@ ENDPOINT_DISPLAY_NAME = os.getenv('ENDPOINT_DISPLAY_NAME')
 DEPLOYED_INDEX_ID = os.getenv('DEPLOYED_INDEX_ID')
 BUCKET_NAME = os.getenv('BUCKET_NAME')
 
-# Authenticate and initialize Vertex AI SDK
-credentials = service_account.Credentials.from_service_account_file(GOOGLE_APPLICATION_CREDENTIALS)
-aiplatform.init(project=PROJECT_ID, location=LOCATION, credentials=credentials)
+# Check if credentials are available
+if not os.path.isfile(GOOGLE_APPLICATION_CREDENTIALS):
+    st.error(f"Service account key file not found at {GOOGLE_APPLICATION_CREDENTIALS}")
+else:
+    credentials = service_account.Credentials.from_service_account_file(GOOGLE_APPLICATION_CREDENTIALS)
+    # Authenticate and initialize Vertex AI SDK
+    aiplatform.init(project=PROJECT_ID, location=LOCATION, credentials=credentials)
 
+# Function to extract text from Word documents
 def extract_text_from_word(file):
     doc = Document(file)
-    full_text = []
-    for para in doc.paragraphs:
-        full_text.append(para.text)
+    full_text = [para.text for para in doc.paragraphs]
     return '\n'.join(full_text)
 
+# Function to extract text from PowerPoint files
 def extract_text_from_ppt(file):
     prs = Presentation(file)
-    full_text = []
-    for slide in prs.slides:
-        for shape in slide.shapes:
-            if hasattr(shape, "text"):
-                full_text.append(shape.text)
+    full_text = [shape.text for slide in prs.slides for shape in slide.shapes if hasattr(shape, "text")]
     return '\n'.join(full_text)
 
+# Function to extract text from Excel files
 def extract_text_from_excel(file):
     workbook = load_workbook(filename=file, data_only=True)
     full_text = []
@@ -55,6 +56,7 @@ def extract_text_from_excel(file):
                 full_text.append(row_text)
     return '\n'.join(full_text)
 
+# Preprocess documents by extracting text based on file type
 def preprocess_documents(uploaded_files):
     documents = []
     for uploaded_file in uploaded_files:
@@ -65,6 +67,7 @@ def preprocess_documents(uploaded_files):
         elif uploaded_file.name.endswith('.xlsx'):
             text = extract_text_from_excel(uploaded_file)
         else:
+            st.warning(f"Unsupported file type: {uploaded_file.name}")
             continue  # Skip unsupported file types
         documents.append({
             'text': text,
@@ -74,6 +77,7 @@ def preprocess_documents(uploaded_files):
         })
     return documents
 
+# Function to generate embeddings for texts
 def get_embeddings(texts):
     embedding_model = aiplatform.TextEmbeddingModel.from_pretrained(EMBEDDING_MODEL_NAME)
     embeddings = []
@@ -82,8 +86,8 @@ def get_embeddings(texts):
         embeddings.append(result.embeddings[0].values)
     return embeddings
 
+# Function to create index and deploy it to Vertex AI Matching Engine
 def create_index(embeddings, documents):
-    # Create the Matching Engine Index
     index = aiplatform.MatchingEngineIndex.create_tree_ah_index(
         display_name=INDEX_DISPLAY_NAME,
         contents=embeddings,
@@ -93,7 +97,6 @@ def create_index(embeddings, documents):
     )
     index.wait()
 
-    # Create Index Endpoint and deploy the index
     index_endpoint = aiplatform.MatchingEngineIndexEndpoint.create(
         display_name=ENDPOINT_DISPLAY_NAME,
     )
@@ -107,27 +110,25 @@ def create_index(embeddings, documents):
 
     return index_endpoint
 
+# Function to perform nearest neighbor search
 def query_index(index_endpoint, query_text):
     embedding_model = aiplatform.TextEmbeddingModel.from_pretrained(EMBEDDING_MODEL_NAME)
     query_embedding = embedding_model.get_embeddings([query_text]).embeddings[0].values
 
-    # Perform nearest neighbor search
     response = index_endpoint.match(
         deployed_index_id=DEPLOYED_INDEX_ID,
         queries=[query_embedding],
         num_neighbors=5,
     )
 
-    # Extract matched documents
     matched_docs = []
     for neighbor in response[0].neighbors:
-        # Assuming the IDs correspond to the order of uploaded documents
-        idx = int(neighbor.datapoint_id)
+        idx = int(neighbor.datapoint_id)  # Assuming the IDs correspond to the order of uploaded documents
         matched_docs.append(idx)
     return matched_docs
 
+# Function to generate a response using Vertex AI language model
 def generate_response(query_text, context_texts):
-    # Prepare the prompt
     prompt = f"""Answer the following question based on the provided context.
 
 Context:
@@ -138,12 +139,11 @@ Question:
 
 Answer:"""
 
-    # Use Vertex AI language model
     llm = aiplatform.TextGenerationModel.from_pretrained("text-bison@001")
     response = llm.predict(prompt)
     return response.text
 
-# Streamlit App
+# Streamlit App Interface
 
 st.title("Retrieval Augmented Generation with Vertex AI")
 
@@ -155,39 +155,32 @@ uploaded_files = st.sidebar.file_uploader(
     accept_multiple_files=True
 )
 
+# Process the uploaded documents
 if st.sidebar.button("Process Documents"):
     if uploaded_files:
         with st.spinner("Processing documents..."):
-            # Step 1: Preprocess documents
             documents = preprocess_documents(uploaded_files)
-
-            # Step 2: Generate embeddings
-            texts = [doc['text'] for doc in documents]
-            embeddings = get_embeddings(texts)
-
-            # Step 3: Create index and deploy endpoint
-            index_endpoint = create_index(embeddings, documents)
-
-            st.success("Documents processed and index created successfully!")
+            if documents:
+                texts = [doc['text'] for doc in documents]
+                embeddings = get_embeddings(texts)
+                index_endpoint = create_index(embeddings, documents)
+                st.success("Documents processed and index created successfully!")
     else:
         st.warning("Please upload at least one document.")
 
-# Main interface for querying
+# Query input for the main interface
 query_text = st.text_input("Enter your query:")
 
+# Handle user query and generate an answer
 if st.button("Get Answer"):
     if 'index_endpoint' in locals():
         with st.spinner("Retrieving information and generating answer..."):
-            # Step 4: Handle user query
             matched_indices = query_index(index_endpoint, query_text)
-
-            # Retrieve matched documents' text
             context_texts = ''
             for idx in matched_indices:
                 doc = documents[idx]
                 context_texts += doc['text'] + '\n'
 
-            # Step 5: Generate response
             answer = generate_response(query_text, context_texts)
             st.subheader("Answer:")
             st.write(answer)
