@@ -24,16 +24,36 @@ import numpy as np
 # Load environment variables from .env file
 load_dotenv()
 
-# Retrieve environment variables
+# =========================
+# Streamlit Page Configuration
+# =========================
+
+# Set Streamlit page configuration as the very first Streamlit command
+st.set_page_config(
+    page_title="📄 RAG App with Qdrant Cloud",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+# =========================
+# Retrieve Environment Variables
+# =========================
+
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
 QDRANT_URL = os.getenv("QDRANT_URL")  # e.g., "https://your-instance.qdrant.io"
 
-# Validate that all necessary environment variables are set
+# =========================
+# Validate Environment Variables
+# =========================
+
 if not all([QDRANT_API_KEY, QDRANT_URL]):
     st.error("Please ensure that QDRANT_API_KEY and QDRANT_URL are set in the .env file.")
     st.stop()
 
+# =========================
 # Initialize Qdrant Client
+# =========================
+
 try:
     qdrant_client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
 except Exception as e:
@@ -47,7 +67,10 @@ COLLECTION_NAME = "documents"
 EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"  # A lightweight, efficient model
 VECTOR_SIZE = 384  # Dimension size for all-MiniLM-L6-v2
 
-# Initialize Sentence Transformer model
+# =========================
+# Initialize Sentence Transformer Model
+# =========================
+
 @st.cache_resource
 def load_embedding_model():
     """
@@ -69,24 +92,13 @@ def load_embedding_model():
 embedding_model = load_embedding_model()
 
 # =========================
-# Streamlit Page Configuration
-# =========================
-
-# Set Streamlit page configuration as the first Streamlit command
-st.set_page_config(
-    page_title="📄 RAG App with Qdrant Cloud",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
-
-# =========================
 # Utility Functions
 # =========================
 
 def initialize_qdrant_collection():
     """
     Initializes the Qdrant collection with the specified schema.
-    If the collection already exists, it will be recreated.
+    If the collection already exists, it will not be recreated.
 
     Example:
         initialize_qdrant_collection()
@@ -95,14 +107,18 @@ def initialize_qdrant_collection():
         None
     """
     try:
-        qdrant_client.recreate_collection(
-            collection_name=COLLECTION_NAME,
-            vectors_config=VectorParams(
-                size=VECTOR_SIZE,
-                distance=Distance.COSINE,
-            ),
-        )
-        st.sidebar.success(f"Qdrant collection '{COLLECTION_NAME}' is ready.")
+        existing_collections = qdrant_client.get_collections().collections
+        if COLLECTION_NAME not in [col.name for col in existing_collections]:
+            qdrant_client.create_collection(
+                collection_name=COLLECTION_NAME,
+                vectors_config=VectorParams(
+                    size=VECTOR_SIZE,
+                    distance=Distance.COSINE,
+                ),
+            )
+            st.sidebar.success(f"Qdrant collection '{COLLECTION_NAME}' created successfully.")
+        else:
+            st.sidebar.info(f"Qdrant collection '{COLLECTION_NAME}' already exists.")
     except Exception as e:
         st.sidebar.error(f"Error initializing Qdrant collection: {e}")
         st.stop()
