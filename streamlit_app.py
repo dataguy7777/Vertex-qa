@@ -24,7 +24,7 @@ import numpy as np
 # Load environment variables from .env file
 load_dotenv()
 
-# Retrieve API keys and URLs from environment variables
+# Retrieve environment variables
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
 QDRANT_URL = os.getenv("QDRANT_URL")  # e.g., "https://your-instance.qdrant.io"
 
@@ -69,6 +69,17 @@ def load_embedding_model():
 embedding_model = load_embedding_model()
 
 # =========================
+# Streamlit Page Configuration
+# =========================
+
+# Set Streamlit page configuration as the first Streamlit command
+st.set_page_config(
+    page_title="📄 RAG App with Qdrant Cloud",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+# =========================
 # Utility Functions
 # =========================
 
@@ -91,9 +102,9 @@ def initialize_qdrant_collection():
                 distance=Distance.COSINE,
             ),
         )
-        st.success(f"Qdrant collection '{COLLECTION_NAME}' is ready.")
+        st.sidebar.success(f"Qdrant collection '{COLLECTION_NAME}' is ready.")
     except Exception as e:
-        st.error(f"Error initializing Qdrant collection: {e}")
+        st.sidebar.error(f"Error initializing Qdrant collection: {e}")
         st.stop()
 
 def extract_text_from_pdf(file: io.BytesIO) -> str:
@@ -205,9 +216,9 @@ def store_document(document_id: str, embedding: list, metadata: dict):
     )
     try:
         qdrant_client.upsert(collection_name=COLLECTION_NAME, points=[point])
-        st.success(f"Document '{metadata.get('file_name')}' indexed successfully.")
+        st.sidebar.success(f"Document '{metadata.get('file_name')}' indexed successfully.")
     except Exception as e:
-        st.error(f"Failed to store document in Qdrant: {e}")
+        st.sidebar.error(f"Failed to store document in Qdrant: {e}")
 
 def query_similar_documents(query_embedding: list, top_k: int = 5):
     """
@@ -253,9 +264,6 @@ def main():
     """
     # Initialize Qdrant collection
     initialize_qdrant_collection()
-
-    # Set Streamlit page configuration
-    st.set_page_config(page_title="📄 RAG App with Qdrant Cloud", layout="wide")
 
     # App Title
     st.title("📄 Retrieval-Augmented Generation (RAG) App with Qdrant Cloud")
