@@ -5,7 +5,7 @@ import os
 import uuid
 from dotenv import load_dotenv
 from qdrant_client import QdrantClient
-from qdrant_client.models import Distance
+from qdrant_client.models import Distance, VectorParams, PointStruct
 from sentence_transformers import SentenceTransformer
 import numpy as np
 from sklearn.decomposition import PCA
@@ -13,6 +13,8 @@ import plotly.express as px
 import logging
 import io
 from PIL import Image
+from pdf2image import convert_from_bytes
+import pandas as pd
 
 # =========================
 # Logging Configuration
@@ -144,7 +146,7 @@ def reduce_dimensionality(vectors: np.ndarray, n_components: int = 2) -> np.ndar
         logger.error(f"Failed to reduce dimensionality: {e}")
         return np.array([])
 
-def create_interactive_plot(vectors_2d: np.ndarray, metadata: list) -> None:
+def create_interactive_plot(vectors_2d: np.ndarray, metadata: list) -> pd.DataFrame:
     """
     Creates an interactive Plotly scatter plot of the 2D vectors.
 
@@ -153,12 +155,10 @@ def create_interactive_plot(vectors_2d: np.ndarray, metadata: list) -> None:
         metadata (list): List of metadata dictionaries corresponding to each vector.
 
     Returns:
-        None
+        pd.DataFrame: DataFrame containing vector coordinates and metadata.
     """
     try:
         # Prepare DataFrame for Plotly
-        import pandas as pd
-
         df = pd.DataFrame({
             'x': vectors_2d[:, 0],
             'y': vectors_2d[:, 1],
@@ -167,8 +167,7 @@ def create_interactive_plot(vectors_2d: np.ndarray, metadata: list) -> None:
             'file_type': [md.get('file_type', 'default') for md in metadata],
             'chunk_text': [md.get('chunk_text', '') for md in metadata],
             'page_number': [md.get('page_number', None) for md in metadata],
-            'paragraph_number': [md.get('paragraph_number', None) for md in metadata],
-            'similarity_score': [md.get('similarity_score', 0) for md in metadata]
+            'paragraph_number': [md.get('paragraph_number', None) for md in metadata]
         })
 
         # Create Plotly scatter plot
@@ -183,26 +182,22 @@ def create_interactive_plot(vectors_2d: np.ndarray, metadata: list) -> None:
             height=600
         )
 
-        # Add custom data for detailed view on click
+        # Update marker size and color
         fig.update_traces(marker=dict(size=8, color='blue'), selector=dict(mode='markers'))
 
-        # Display Plotly chart
+        # Display Plotly chart and capture click events
         selected_points = st.plotly_chart(fig, use_container_width=True)
 
-        # Note: Streamlit does not support capturing Plotly click events directly.
-        # Alternative approach: Allow users to select points via a selection box.
+        # Use Streamlit's Plotly event to capture clicks
+        clicked_point = None
+        if 'plotly_click' in st.session_state:
+            clicked_point = st.session_state['plotly_click']
+            logger.info(f"Point clicked: {clicked_point}")
 
-        # Create a selection widget
-        st.sidebar.header("🖱️ Select a Vector")
-        selected_doc = st.sidebar.selectbox(
-            "Select a document to view details:",
-            options=[f"{md.get('file_name', 'Unknown')} ({md.get('document_id', 'N/A')})" for md in metadata]
-        )
-
-        # Find the selected metadata
-        selected_metadata = next((md for md in metadata if f"{md.get('file_name', 'Unknown')} ({md.get('document_id', 'N/A')})" == selected_doc), None)
-
-        if selected_metadata:
+        # Display selected point details
+        if clicked_point:
+            point_index = clicked_point['pointIndex']
+            selected_metadata = metadata[point_index]
             st.sidebar.markdown("---")
             st.sidebar.subheader("📄 Document Details")
             st.sidebar.markdown(f"**File Name**: {selected_metadata.get('file_name', 'Unknown')}")
@@ -213,9 +208,13 @@ def create_interactive_plot(vectors_2d: np.ndarray, metadata: list) -> None:
             if selected_metadata.get('file_type') == 'docx':
                 st.sidebar.markdown(f"**Paragraph Number**: {selected_metadata.get('paragraph_number', 'N/A')}")
             st.sidebar.markdown(f"**Snippet**: {selected_metadata.get('chunk_text', '')[:500]}...")
+            st.sidebar.markdown("---")
+
+        return df
     except Exception as e:
         st.error(f"Failed to create interactive plot: {e}")
         logger.error(f"Failed to create interactive plot: {e}")
+        return pd.DataFrame()
 
 def get_file_icon(file_type: str) -> str:
     """
@@ -273,7 +272,7 @@ def main():
 
     # Create Interactive Plot
     with st.spinner("Creating interactive plot..."):
-        create_interactive_plot(vectors_2d, metadata)
+        df = create_interactive_plot(vectors_2d, metadata)
 
     st.markdown("---")
     st.markdown("Developed with ❤️ using Streamlit, Qdrant Cloud, and Plotly.")
