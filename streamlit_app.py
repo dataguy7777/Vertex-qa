@@ -1,188 +1,342 @@
 # app.py
 
-import os
 import streamlit as st
-from google.cloud import aiplatform
-from google.oauth2 import service_account
-from google.cloud import storage
-import pandas as pd
-from docx import Document
-from pptx import Presentation
-from openpyxl import load_workbook
+import os
+import uuid
+import io
 from dotenv import load_dotenv
+from qdrant_client import QdrantClient
+from qdrant_client.models import (
+    CollectionConfig,
+    Distance,
+    VectorParams,
+    PointStruct,
+)
+from pdfminer.high_level import extract_text
+from docx import Document
+from sentence_transformers import SentenceTransformer
+import numpy as np
+
+# =========================
+# Configuration and Setup
+# =========================
 
 # Load environment variables from .env file
 load_dotenv()
 
-# Environment variables
-GOOGLE_APPLICATION_CREDENTIALS = os.getenv('GOOGLE_APPLICATION_CREDENTIALS')
-PROJECT_ID = os.getenv('PROJECT_ID')
-LOCATION = os.getenv('LOCATION')
-EMBEDDING_MODEL_NAME = os.getenv('EMBEDDING_MODEL_NAME')
-INDEX_DISPLAY_NAME = os.getenv('INDEX_DISPLAY_NAME')
-ENDPOINT_DISPLAY_NAME = os.getenv('ENDPOINT_DISPLAY_NAME')
-DEPLOYED_INDEX_ID = os.getenv('DEPLOYED_INDEX_ID')
-BUCKET_NAME = os.getenv('BUCKET_NAME')
+# Retrieve API keys and URLs from environment variables
+QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
+QDRANT_URL = os.getenv("QDRANT_URL")  # e.g., "https://your-instance.qdrant.io"
 
-# Check if credentials are available
-if not os.path.isfile(GOOGLE_APPLICATION_CREDENTIALS):
-    st.error(f"Service account key file not found at {GOOGLE_APPLICATION_CREDENTIALS}")
-else:
-    credentials = service_account.Credentials.from_service_account_file(GOOGLE_APPLICATION_CREDENTIALS)
-    # Authenticate and initialize Vertex AI SDK
-    aiplatform.init(project=PROJECT_ID, location=LOCATION, credentials=credentials)
+# Validate that all necessary environment variables are set
+if not all([QDRANT_API_KEY, QDRANT_URL]):
+    st.error("Please ensure that QDRANT_API_KEY and QDRANT_URL are set in the .env file.")
+    st.stop()
 
-# Function to extract text from Word documents
-def extract_text_from_word(file):
-    doc = Document(file)
-    full_text = [para.text for para in doc.paragraphs]
-    return '\n'.join(full_text)
+# Initialize Qdrant Client
+try:
+    qdrant_client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
+except Exception as e:
+    st.error(f"Failed to connect to Qdrant Cloud: {e}")
+    st.stop()
 
-# Function to extract text from PowerPoint files
-def extract_text_from_ppt(file):
-    prs = Presentation(file)
-    full_text = [shape.text for slide in prs.slides for shape in slide.shapes if hasattr(shape, "text")]
-    return '\n'.join(full_text)
+# Define Qdrant collection name
+COLLECTION_NAME = "documents"
 
-# Function to extract text from Excel files
-def extract_text_from_excel(file):
-    workbook = load_workbook(filename=file, data_only=True)
-    full_text = []
-    for sheet_name in workbook.sheetnames:
-        sheet = workbook[sheet_name]
-        for row in sheet.iter_rows(values_only=True):
-            row_text = ' '.join([str(cell) for cell in row if cell is not None])
-            if row_text:
-                full_text.append(row_text)
-    return '\n'.join(full_text)
+# Define embedding model parameters
+EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"  # A lightweight, efficient model
+VECTOR_SIZE = 384  # Dimension size for all-MiniLM-L6-v2
 
-# Preprocess documents by extracting text based on file type
-def preprocess_documents(uploaded_files):
-    documents = []
-    for uploaded_file in uploaded_files:
-        if uploaded_file.name.endswith('.docx'):
-            text = extract_text_from_word(uploaded_file)
-        elif uploaded_file.name.endswith('.pptx'):
-            text = extract_text_from_ppt(uploaded_file)
-        elif uploaded_file.name.endswith('.xlsx'):
-            text = extract_text_from_excel(uploaded_file)
-        else:
-            st.warning(f"Unsupported file type: {uploaded_file.name}")
-            continue  # Skip unsupported file types
-        documents.append({
-            'text': text,
-            'metadata': {
-                'file_name': uploaded_file.name
-            }
-        })
-    return documents
+# Initialize Sentence Transformer model
+@st.cache_resource
+def load_embedding_model():
+    """
+    Loads the pre-trained SentenceTransformer model for generating embeddings.
 
-# Function to generate embeddings for texts
-def get_embeddings(texts):
-    embedding_model = aiplatform.TextEmbeddingModel.from_pretrained(EMBEDDING_MODEL_NAME)
-    embeddings = []
-    for text in texts:
-        result = embedding_model.get_embeddings([text])
-        embeddings.append(result.embeddings[0].values)
-    return embeddings
+    Returns:
+        SentenceTransformer: The loaded embedding model.
 
-# Function to create index and deploy it to Vertex AI Matching Engine
-def create_index(embeddings, documents):
-    index = aiplatform.MatchingEngineIndex.create_tree_ah_index(
-        display_name=INDEX_DISPLAY_NAME,
-        contents=embeddings,
-        dimensions=len(embeddings[0]),
-        approximate_neighbors_count=100,
-        distance_measure_type='COSINE_DISTANCE',
+    Example:
+        model = load_embedding_model()
+    """
+    try:
+        model = SentenceTransformer(EMBEDDING_MODEL_NAME)
+        return model
+    except Exception as e:
+        st.error(f"Failed to load embedding model: {e}")
+        st.stop()
+
+embedding_model = load_embedding_model()
+
+# =========================
+# Utility Functions
+# =========================
+
+def initialize_qdrant_collection():
+    """
+    Initializes the Qdrant collection with the specified schema.
+    If the collection already exists, it will be recreated.
+
+    Example:
+        initialize_qdrant_collection()
+
+    Output:
+        None
+    """
+    try:
+        qdrant_client.recreate_collection(
+            collection_name=COLLECTION_NAME,
+            vectors_config=VectorParams(
+                size=VECTOR_SIZE,
+                distance=Distance.COSINE,
+            ),
+        )
+        st.success(f"Qdrant collection '{COLLECTION_NAME}' is ready.")
+    except Exception as e:
+        st.error(f"Error initializing Qdrant collection: {e}")
+        st.stop()
+
+def extract_text_from_pdf(file: io.BytesIO) -> str:
+    """
+    Extracts text from a PDF file.
+
+    Args:
+        file (io.BytesIO): The uploaded PDF file.
+
+    Returns:
+        str: Extracted text content.
+
+    Example:
+        text = extract_text_from_pdf(uploaded_pdf)
+    """
+    try:
+        text = extract_text(file)
+        return text
+    except Exception as e:
+        st.warning(f"Failed to extract text from PDF: {e}")
+        return ""
+
+def extract_text_from_docx(file: io.BytesIO) -> str:
+    """
+    Extracts text from a DOCX file.
+
+    Args:
+        file (io.BytesIO): The uploaded DOCX file.
+
+    Returns:
+        str: Extracted text content.
+
+    Example:
+        text = extract_text_from_docx(uploaded_docx)
+    """
+    try:
+        doc = Document(io.BytesIO(file.read()))
+        full_text = "\n".join([para.text for para in doc.paragraphs])
+        return full_text
+    except Exception as e:
+        st.warning(f"Failed to extract text from DOCX: {e}")
+        return ""
+
+def extract_text_from_file(file) -> str:
+    """
+    Determines the file type and extracts text accordingly.
+
+    Args:
+        file (UploadedFile): The uploaded file from Streamlit.
+
+    Returns:
+        str: Extracted text content.
+
+    Example:
+        text = extract_text_from_file(uploaded_file)
+    """
+    if file.type == "application/pdf":
+        return extract_text_from_pdf(file)
+    elif file.type in [
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/msword",
+    ]:
+        return extract_text_from_docx(file)
+    else:
+        st.warning(f"Unsupported file type: {file.type}")
+        return ""
+
+def generate_embedding(text: str) -> list:
+    """
+    Generates an embedding vector for the given text using SentenceTransformer.
+
+    Args:
+        text (str): The input text to generate embedding for.
+
+    Returns:
+        list: The embedding vector.
+
+    Example:
+        embedding = generate_embedding("Sample text for embedding.")
+    """
+    try:
+        embedding = embedding_model.encode(text)
+        # Normalize the embedding to unit vector for cosine similarity
+        embedding = embedding / np.linalg.norm(embedding)
+        return embedding.tolist()
+    except Exception as e:
+        st.warning(f"Failed to generate embedding: {e}")
+        return None
+
+def store_document(document_id: str, embedding: list, metadata: dict):
+    """
+    Stores a document's embedding and metadata in Qdrant.
+
+    Args:
+        document_id (str): Unique identifier for the document.
+        embedding (list): The embedding vector of the document.
+        metadata (dict): Metadata associated with the document.
+
+    Returns:
+        None
+
+    Example:
+        store_document("1234", [0.1, 0.2, ...], {"file_name": "doc.pdf"})
+    """
+    point = PointStruct(
+        id=document_id,
+        vector=embedding,
+        payload=metadata
     )
-    index.wait()
+    try:
+        qdrant_client.upsert(collection_name=COLLECTION_NAME, points=[point])
+        st.success(f"Document '{metadata.get('file_name')}' indexed successfully.")
+    except Exception as e:
+        st.error(f"Failed to store document in Qdrant: {e}")
 
-    index_endpoint = aiplatform.MatchingEngineIndexEndpoint.create(
-        display_name=ENDPOINT_DISPLAY_NAME,
+def query_similar_documents(query_embedding: list, top_k: int = 5):
+    """
+    Queries Qdrant for documents similar to the provided embedding.
+
+    Args:
+        query_embedding (list): The embedding vector of the query.
+        top_k (int): Number of top similar documents to retrieve.
+
+    Returns:
+        list: A list of similar documents with their metadata and scores.
+
+    Example:
+        results = query_similar_documents([0.1, 0.2, ...], top_k=3)
+    """
+    try:
+        search_result = qdrant_client.search(
+            collection_name=COLLECTION_NAME,
+            query_vector=query_embedding,
+            limit=top_k,
+        )
+        return search_result
+    except Exception as e:
+        st.error(f"Failed to query Qdrant: {e}")
+        return []
+
+# =========================
+# Streamlit Application
+# =========================
+
+def main():
+    """
+    The main function that defines the Streamlit app layout and interactions.
+
+    Args:
+        None
+
+    Returns:
+        None
+
+    Example:
+        main()
+    """
+    # Initialize Qdrant collection
+    initialize_qdrant_collection()
+
+    # Set Streamlit page configuration
+    st.set_page_config(page_title="📄 RAG App with Qdrant Cloud", layout="wide")
+
+    # App Title
+    st.title("📄 Retrieval-Augmented Generation (RAG) App with Qdrant Cloud")
+
+    # =========================
+    # Sidebar: File Upload
+    # =========================
+    st.sidebar.header("📂 Upload Documents")
+    uploaded_files = st.sidebar.file_uploader(
+        "Choose PDF or DOCX files", type=["pdf", "docx"], accept_multiple_files=True
     )
-    index_endpoint.wait()
 
-    deployed_index = index_endpoint.deploy_index(
-        index=index,
-        deployed_index_id=DEPLOYED_INDEX_ID,
-    )
-    deployed_index.wait()
-
-    return index_endpoint
-
-# Function to perform nearest neighbor search
-def query_index(index_endpoint, query_text):
-    embedding_model = aiplatform.TextEmbeddingModel.from_pretrained(EMBEDDING_MODEL_NAME)
-    query_embedding = embedding_model.get_embeddings([query_text]).embeddings[0].values
-
-    response = index_endpoint.match(
-        deployed_index_id=DEPLOYED_INDEX_ID,
-        queries=[query_embedding],
-        num_neighbors=5,
-    )
-
-    matched_docs = []
-    for neighbor in response[0].neighbors:
-        idx = int(neighbor.datapoint_id)  # Assuming the IDs correspond to the order of uploaded documents
-        matched_docs.append(idx)
-    return matched_docs
-
-# Function to generate a response using Vertex AI language model
-def generate_response(query_text, context_texts):
-    prompt = f"""Answer the following question based on the provided context.
-
-Context:
-{context_texts}
-
-Question:
-{query_text}
-
-Answer:"""
-
-    llm = aiplatform.TextGenerationModel.from_pretrained("text-bison@001")
-    response = llm.predict(prompt)
-    return response.text
-
-# Streamlit App Interface
-
-st.title("Retrieval Augmented Generation with Vertex AI")
-
-# Sidebar for uploading documents
-st.sidebar.header("Upload Documents")
-uploaded_files = st.sidebar.file_uploader(
-    "Upload .docx, .pptx, .xlsx files",
-    type=['docx', 'pptx', 'xlsx'],
-    accept_multiple_files=True
-)
-
-# Process the uploaded documents
-if st.sidebar.button("Process Documents"):
     if uploaded_files:
-        with st.spinner("Processing documents..."):
-            documents = preprocess_documents(uploaded_files)
-            if documents:
-                texts = [doc['text'] for doc in documents]
-                embeddings = get_embeddings(texts)
-                index_endpoint = create_index(embeddings, documents)
-                st.success("Documents processed and index created successfully!")
-    else:
-        st.warning("Please upload at least one document.")
+        for uploaded_file in uploaded_files:
+            st.sidebar.write(f"Processing: {uploaded_file.name}")
+            # Extract text from the uploaded file
+            text = extract_text_from_file(uploaded_file)
+            if not text:
+                st.sidebar.warning(f"No text extracted from {uploaded_file.name}. Skipping.")
+                continue
 
-# Query input for the main interface
-query_text = st.text_input("Enter your query:")
+            # Generate a unique document ID
+            document_id = str(uuid.uuid4())
 
-# Handle user query and generate an answer
-if st.button("Get Answer"):
-    if 'index_endpoint' in locals():
-        with st.spinner("Retrieving information and generating answer..."):
-            matched_indices = query_index(index_endpoint, query_text)
-            context_texts = ''
-            for idx in matched_indices:
-                doc = documents[idx]
-                context_texts += doc['text'] + '\n'
+            # Prepare metadata
+            metadata = {
+                "file_name": uploaded_file.name,
+                "document_id": document_id,
+                # Additional metadata can be added here
+            }
 
-            answer = generate_response(query_text, context_texts)
-            st.subheader("Answer:")
-            st.write(answer)
-    else:
-        st.warning("Please process documents first by uploading them in the sidebar.")
+            # Generate embedding for the extracted text
+            embedding = generate_embedding(text)
+            if embedding is None:
+                st.sidebar.error(f"Failed to generate embedding for {uploaded_file.name}.")
+                continue
+
+            # Store the document in Qdrant
+            store_document(document_id, embedding, metadata)
+
+    st.sidebar.markdown("---")
+    st.sidebar.info("Upload PDF or DOCX files to index them for searching.")
+
+    # =========================
+    # Main Section: Querying
+    # =========================
+    st.header("🔍 Search Documents")
+
+    # Input field for user query
+    user_query = st.text_input("Enter your query here:", "")
+
+    # Search button
+    if st.button("Search"):
+        if not user_query.strip():
+            st.warning("Please enter a valid query.")
+        else:
+            with st.spinner("Generating embedding and searching for similar documents..."):
+                # Generate embedding for the query
+                query_embedding = generate_embedding(user_query)
+                if query_embedding is None:
+                    st.error("Failed to generate embedding for the query.")
+                else:
+                    # Query Qdrant for similar documents
+                    results = query_similar_documents(query_embedding, top_k=5)
+
+                    if not results:
+                        st.info("No similar documents found.")
+                    else:
+                        st.success(f"Found {len(results)} similar document(s):")
+                        for idx, result in enumerate(results, start=1):
+                            payload = result.payload
+                            file_name = payload.get("file_name", "Unknown")
+                            document_id = payload.get("document_id", "N/A")
+                            score = result.score
+                            st.markdown(f"### {idx}. {file_name}")
+                            st.markdown(f"**Document ID**: {document_id}")
+                            st.markdown(f"**Similarity Score**: {score:.4f}")
+                            st.markdown("---")
+
+    st.markdown("---")
+    st.markdown("Developed with ❤️ using Streamlit and Qdrant Cloud.")
+
+if __name__ == "__main__":
+    main()
