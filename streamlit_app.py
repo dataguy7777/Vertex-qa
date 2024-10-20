@@ -18,6 +18,25 @@ from sentence_transformers import SentenceTransformer
 import numpy as np
 import tempfile
 from typing import List, Dict, Tuple
+import logging
+from pdf2image import convert_from_bytes
+from PIL import Image
+import base64
+
+# =========================
+# Logging Configuration
+# =========================
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.FileHandler("app.log"),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
 # =========================
 # Configuration and Setup
@@ -50,6 +69,7 @@ QDRANT_URL = os.getenv("QDRANT_URL")  # e.g., "https://your-instance.qdrant.io"
 
 if not all([QDRANT_API_KEY, QDRANT_URL]):
     st.error("Please ensure that QDRANT_API_KEY and QDRANT_URL are set in the .env file.")
+    logger.error("Missing QDRANT_API_KEY or QDRANT_URL in .env file.")
     st.stop()
 
 # =========================
@@ -58,8 +78,10 @@ if not all([QDRANT_API_KEY, QDRANT_URL]):
 
 try:
     qdrant_client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
+    logger.info("Successfully connected to Qdrant Cloud.")
 except Exception as e:
     st.error(f"Failed to connect to Qdrant Cloud: {e}")
+    logger.error(f"Failed to connect to Qdrant Cloud: {e}")
     st.stop()
 
 # Define Qdrant collection name
@@ -86,9 +108,11 @@ def load_embedding_model():
     """
     try:
         model = SentenceTransformer(EMBEDDING_MODEL_NAME)
+        logger.info(f"Loaded embedding model: {EMBEDDING_MODEL_NAME}")
         return model
     except Exception as e:
         st.error(f"Failed to load embedding model: {e}")
+        logger.error(f"Failed to load embedding model: {e}")
         st.stop()
 
 embedding_model = load_embedding_model()
@@ -119,10 +143,13 @@ def initialize_qdrant_collection():
                 ),
             )
             st.sidebar.success(f"Qdrant collection '{COLLECTION_NAME}' created successfully.")
+            logger.info(f"Qdrant collection '{COLLECTION_NAME}' created successfully.")
         else:
             st.sidebar.info(f"Qdrant collection '{COLLECTION_NAME}' already exists.")
+            logger.info(f"Qdrant collection '{COLLECTION_NAME}' already exists.")
     except Exception as e:
         st.sidebar.error(f"Error initializing Qdrant collection: {e}")
+        logger.error(f"Error initializing Qdrant collection: {e}")
         st.stop()
 
 def extract_text_from_pdf(file: io.BytesIO) -> List[Tuple[int, str]]:
@@ -145,18 +172,17 @@ def extract_text_from_pdf(file: io.BytesIO) -> List[Tuple[int, str]]:
             extract_text_to_fp(file, temp_file, laparams=laparams, output_type='text', codec=None)
             temp_file.seek(0)
             text = temp_file.read().decode('utf-8')
-            # Split text by pages if possible
-            # Note: pdfminer doesn't directly provide page breaks, so this is a workaround
-            # Alternatively, use PyPDF2 for better page extraction
-            # Here, we'll split by form feed character '\f'
+            # Split text by form feed character '\f' to separate pages
             page_texts = text.split('\f')
             for i, page in enumerate(page_texts, start=1):
                 clean_page = page.strip()
                 if clean_page:
                     pages.append((i, clean_page))
+        logger.info(f"Extracted text from PDF with {len(pages)} pages.")
         return pages
     except Exception as e:
         st.warning(f"Failed to extract text from PDF: {e}")
+        logger.error(f"Failed to extract text from PDF: {e}")
         return []
 
 def extract_text_from_docx(file: io.BytesIO) -> List[Tuple[int, str]]:
@@ -179,9 +205,11 @@ def extract_text_from_docx(file: io.BytesIO) -> List[Tuple[int, str]]:
             clean_para = para.text.strip()
             if clean_para:
                 paragraphs.append((i, clean_para))
+        logger.info(f"Extracted text from DOCX with {len(paragraphs)} paragraphs.")
         return paragraphs
     except Exception as e:
         st.warning(f"Failed to extract text from DOCX: {e}")
+        logger.error(f"Failed to extract text from DOCX: {e}")
         return []
 
 def extract_text_from_file(file) -> List[Dict]:
@@ -227,6 +255,8 @@ def extract_text_from_file(file) -> List[Dict]:
                 })
     else:
         st.warning(f"Unsupported file type: {file.type}")
+        logger.warning(f"Unsupported file type: {file.type}")
+    logger.info(f"Extracted {len(chunks)} chunks from '{file.name}'.")
     return chunks
 
 def chunk_text(text: str, max_length: int = 500) -> List[str]:
@@ -258,6 +288,7 @@ def chunk_text(text: str, max_length: int = 500) -> List[str]:
             current_chunk = f"{sentence}"
     if current_chunk:
         chunks.append(current_chunk.strip())
+    logger.debug(f"Chunked text into {len(chunks)} chunks.")
     return chunks
 
 def generate_embedding(text: str) -> list:
@@ -277,9 +308,11 @@ def generate_embedding(text: str) -> list:
         embedding = embedding_model.encode(text)
         # Normalize the embedding to unit vector for cosine similarity
         embedding = embedding / np.linalg.norm(embedding)
+        logger.debug("Generated and normalized embedding.")
         return embedding.tolist()
     except Exception as e:
         st.warning(f"Failed to generate embedding: {e}")
+        logger.error(f"Failed to generate embedding: {e}")
         return None
 
 def store_document(chunk: Dict):
@@ -298,6 +331,7 @@ def store_document(chunk: Dict):
     embedding = generate_embedding(chunk["chunk_text"])
     if embedding is None:
         st.sidebar.error(f"Failed to generate embedding for chunk in '{chunk['file_name']}'.")
+        logger.error(f"Failed to generate embedding for chunk in '{chunk['file_name']}'.")
         return
     payload = {
         "file_name": chunk["file_name"],
@@ -310,16 +344,21 @@ def store_document(chunk: Dict):
         payload["paragraph_number"] = chunk.get("paragraph_number", "N/A")
     payload["chunk_text"] = chunk["chunk_text"]
 
+    # Use a single UUID for point ID
+    point_id = str(uuid.uuid4())
+
     point = PointStruct(
-        id=chunk["document_id"] + "_" + str(uuid.uuid4()),  # Unique ID per chunk
+        id=point_id,
         vector=embedding,
         payload=payload
     )
     try:
         qdrant_client.upsert(collection_name=COLLECTION_NAME, points=[point])
         st.sidebar.success(f"Indexed a chunk from '{chunk['file_name']}'.")
+        logger.info(f"Indexed chunk ID: {point_id} from '{chunk['file_name']}'.")
     except Exception as e:
         st.sidebar.error(f"Failed to store chunk in Qdrant: {e}")
+        logger.error(f"Failed to store chunk ID: {point_id} in Qdrant: {e}")
 
 def query_similar_documents(query_embedding: list, top_k: int = 5):
     """
@@ -341,9 +380,11 @@ def query_similar_documents(query_embedding: list, top_k: int = 5):
             query_vector=query_embedding,
             limit=top_k,
         )
+        logger.info(f"Queried Qdrant for top {top_k} similar documents.")
         return search_result
     except Exception as e:
         st.error(f"Failed to query Qdrant: {e}")
+        logger.error(f"Failed to query Qdrant: {e}")
         return []
 
 def get_file_icon(file_type: str) -> str:
@@ -365,6 +406,57 @@ def get_file_icon(file_type: str) -> str:
         "default": "📄"
     }
     return icons.get(file_type, icons["default"])
+
+def generate_pdf_thumbnail(file: io.BytesIO) -> bytes:
+    """
+    Generates a thumbnail image for the first page of a PDF.
+
+    Args:
+        file (io.BytesIO): The uploaded PDF file.
+
+    Returns:
+        bytes: The thumbnail image in bytes.
+
+    Example:
+        thumbnail = generate_pdf_thumbnail(uploaded_pdf)
+    """
+    try:
+        # Reset file pointer
+        file.seek(0)
+        # Convert first page of PDF to image
+        images = convert_from_bytes(file.read(), first_page=1, last_page=1, size=(200, 200))
+        if images:
+            img_buffer = io.BytesIO()
+            images[0].save(img_buffer, format='PNG')
+            img_bytes = img_buffer.getvalue()
+            logger.info("Generated PDF thumbnail.")
+            return img_bytes
+        else:
+            logger.warning("No images generated for PDF thumbnail.")
+            return None
+    except Exception as e:
+        st.warning(f"Failed to generate thumbnail for PDF: {e}")
+        logger.error(f"Failed to generate thumbnail for PDF: {e}")
+        return None
+
+def get_thumbnail(file_type: str, file: io.BytesIO) -> bytes:
+    """
+    Retrieves a thumbnail based on the file type.
+
+    Args:
+        file_type (str): The type of the file (e.g., 'pdf', 'docx').
+        file (io.BytesIO): The uploaded file.
+
+    Returns:
+        bytes: The thumbnail image in bytes, or None.
+    """
+    if file_type == "pdf":
+        return generate_pdf_thumbnail(file)
+    elif file_type == "docx":
+        # For DOCX, you can implement similar logic or return a default icon
+        return None
+    else:
+        return None
 
 # =========================
 # Streamlit Application
@@ -425,6 +517,7 @@ def main():
     if st.button("Search"):
         if not user_query.strip():
             st.warning("Please enter a valid query.")
+            logger.warning("User submitted an empty query.")
         else:
             with st.spinner("Generating embedding and searching for similar documents..."):
                 # Generate embedding for the query
@@ -448,6 +541,7 @@ def main():
                             page_number = payload.get("page_number", None)
                             paragraph_number = payload.get("paragraph_number", None)
                             score = result.score
+                            thumbnail = payload.get("thumbnail", None)
 
                             icon = get_file_icon(file_type)
 
@@ -455,7 +549,12 @@ def main():
                             with st.container():
                                 col1, col2 = st.columns([1, 4])
                                 with col1:
-                                    st.markdown(icon)
+                                    if thumbnail:
+                                        # Display thumbnail
+                                        st.image(thumbnail, width=50)
+                                    else:
+                                        # Display icon
+                                        st.markdown(icon)
                                 with col2:
                                     st.markdown(f"**{file_name}**")
                                     st.markdown(f"**Document ID**: {document_id}")
