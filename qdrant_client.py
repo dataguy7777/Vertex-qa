@@ -1,24 +1,24 @@
 # qdrant_client.py
 
 import uuid
-from typing import List
+from typing import List, Dict
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
 from logger import logger
 import streamlit as st
-from utils import chunk_text
 
 COLLECTION_NAME = "documents"
 VECTOR_SIZE = 384  # Dimension size for all-MiniLM-L6-v2
 
-# Initialize Qdrant Client
-def initialize_qdrant_collection():
+def initialize_qdrant_collection() -> QdrantClient:
     """
     Initializes the Qdrant collection with the specified schema.
     If the collection already exists, it will not be recreated.
+
+    Returns:
+        QdrantClient: The initialized Qdrant client.
     """
-    QDRANT_API_KEY = st.secrets["QDRANT_API_KEY"]
-    QDRANT_URL = st.secrets["QDRANT_URL"]
+    from config import QDRANT_API_KEY, QDRANT_URL
 
     try:
         qdrant_client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
@@ -42,8 +42,7 @@ def initialize_qdrant_collection():
         logger.error(f"Error initializing Qdrant collection: {e}")
         st.stop()
 
-# Store a single document chunk in Qdrant
-def store_document(qdrant_client, chunk: Dict):
+def store_document(qdrant_client: QdrantClient, chunk: Dict):
     """
     Stores a chunk's embedding and metadata in Qdrant.
 
@@ -80,9 +79,6 @@ def store_document(qdrant_client, chunk: Dict):
     elif chunk["file_type"] == "txt":
         payload["line_number"] = chunk.get("line_number", "N/A")
 
-    # Optionally, add a thumbnail if available
-    # payload["thumbnail"] = chunk.get("thumbnail", None)
-
     # Use a single UUID for point ID
     point_id = str(uuid.uuid4())
 
@@ -99,8 +95,7 @@ def store_document(qdrant_client, chunk: Dict):
         st.sidebar.error(f"Failed to store chunk in Qdrant: {e}")
         logger.error(f"Failed to store chunk ID: {point_id} in Qdrant: {e}")
 
-# Query similar documents from Qdrant
-def query_similar_documents(qdrant_client, query_embedding: list, top_k: int = 5):
+def query_similar_documents(qdrant_client: QdrantClient, query_embedding: list, top_k: int = 5):
     """
     Queries Qdrant for documents similar to the provided embedding.
 
