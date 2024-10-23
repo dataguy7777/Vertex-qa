@@ -14,6 +14,8 @@ from qdrant_client.models import (
 from pdfminer.high_level import extract_text_to_fp
 from pdfminer.layout import LAParams
 from docx import Document
+from pptx import Presentation  # Added for PPTX support
+import pandas as pd  # Added for Excel support
 from sentence_transformers import SentenceTransformer
 import numpy as np
 import tempfile
@@ -22,6 +24,8 @@ import logging
 from pdf2image import convert_from_bytes
 from PIL import Image
 import base64
+import openai  # Added for OpenAI API
+import re
 
 # =========================
 # Logging Configuration
@@ -62,15 +66,19 @@ st.set_page_config(
 
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
 QDRANT_URL = os.getenv("QDRANT_URL")  # e.g., "https://your-instance.qdrant.io"
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # Added for OpenAI API
 
 # =========================
 # Validate Environment Variables
 # =========================
 
-if not all([QDRANT_API_KEY, QDRANT_URL]):
-    st.error("Please ensure that QDRANT_API_KEY and QDRANT_URL are set in the .env file.")
-    logger.error("Missing QDRANT_API_KEY or QDRANT_URL in .env file.")
+if not all([QDRANT_API_KEY, QDRANT_URL, OPENAI_API_KEY]):
+    st.error("Please ensure that QDRANT_API_KEY, QDRANT_URL, and OPENAI_API_KEY are set in the .env file.")
+    logger.error("Missing QDRANT_API_KEY, QDRANT_URL, or OPENAI_API_KEY in .env file.")
     st.stop()
+
+# Initialize OpenAI API
+openai.api_key = OPENAI_API_KEY
 
 # =========================
 # Initialize Qdrant Client
@@ -212,6 +220,96 @@ def extract_text_from_docx(file: io.BytesIO) -> List[Tuple[int, str]]:
         logger.error(f"Failed to extract text from DOCX: {e}")
         return []
 
+def extract_text_from_excel(file: io.BytesIO) -> List[Tuple[int, str]]:
+    """
+    Extracts text from an Excel file on a per-cell basis.
+
+    Args:
+        file (io.BytesIO): The uploaded Excel file.
+
+    Returns:
+        List[Tuple[int, str]]: A list of tuples containing cell indices and extracted text.
+
+    Example:
+        cells = extract_text_from_excel(uploaded_excel)
+    """
+    try:
+        dfs = pd.read_excel(file, sheet_name=None)
+        cells = []
+        for sheet_name, df in dfs.items():
+            for row_idx, row in df.iterrows():
+                for col_idx, cell_value in row.items():
+                    if pd.notnull(cell_value):
+                        clean_cell = str(cell_value).strip()
+                        if clean_cell:
+                            cell_identifier = f"{sheet_name}!{col_idx}{row_idx + 2}"  # Excel rows are 1-indexed
+                            cells.append((cell_identifier, clean_cell))
+        logger.info(f"Extracted text from Excel with {len(cells)} cells.")
+        return cells
+    except Exception as e:
+        st.warning(f"Failed to extract text from Excel: {e}")
+        logger.error(f"Failed to extract text from Excel: {e}")
+        return []
+
+def extract_text_from_pptx(file: io.BytesIO) -> List[Tuple[int, str]]:
+    """
+    Extracts text from a PowerPoint file on a per-slide basis.
+
+    Args:
+        file (io.BytesIO): The uploaded PowerPoint file.
+
+    Returns:
+        List[Tuple[int, str]]: A list of tuples containing slide numbers and extracted text.
+
+    Example:
+        slides = extract_text_from_pptx(uploaded_pptx)
+    """
+    try:
+        prs = Presentation(file)
+        slides = []
+        for i, slide in enumerate(prs.slides, start=1):
+            slide_text = ""
+            for shape in slide.shapes:
+                if hasattr(shape, "text"):
+                    slide_text += shape.text + " "
+            clean_slide = slide_text.strip()
+            if clean_slide:
+                slides.append((i, clean_slide))
+        logger.info(f"Extracted text from PowerPoint with {len(slides)} slides.")
+        return slides
+    except Exception as e:
+        st.warning(f"Failed to extract text from PowerPoint: {e}")
+        logger.error(f"Failed to extract text from PowerPoint: {e}")
+        return []
+
+def extract_text_from_txt(file: io.BytesIO) -> List[Tuple[int, str]]:
+    """
+    Extracts text from a text file.
+
+    Args:
+        file (io.BytesIO): The uploaded text file.
+
+    Returns:
+        List[Tuple[int, str]]: A list containing a single tuple with the entire text.
+
+    Example:
+        text = extract_text_from_txt(uploaded_txt)
+    """
+    try:
+        text = file.read().decode('utf-8')
+        lines = text.split('\n')
+        paragraphs = []
+        for i, line in enumerate(lines, start=1):
+            clean_line = line.strip()
+            if clean_line:
+                paragraphs.append((i, clean_line))
+        logger.info(f"Extracted text from text file with {len(paragraphs)} lines.")
+        return paragraphs
+    except Exception as e:
+        st.warning(f"Failed to extract text from text file: {e}")
+        logger.error(f"Failed to extract text from text file: {e}")
+        return []
+
 def extract_text_from_file(file) -> List[Dict]:
     """
     Determines the file type and extracts text accordingly, returning a list of chunks with metadata.
@@ -253,6 +351,45 @@ def extract_text_from_file(file) -> List[Dict]:
                     "paragraph_number": para_num,
                     "chunk_text": chunk
                 })
+    elif file.type == "application/vnd.openxmlformats-officedocument.presentationml.presentation":
+        slides = extract_text_from_pptx(file)
+        for slide_num, text in slides:
+            slide_chunks = chunk_text(text, max_length=500)
+            for chunk in slide_chunks:
+                chunks.append({
+                    "file_name": file.name,
+                    "document_id": str(uuid.uuid4()),
+                    "file_type": "pptx",
+                    "slide_number": slide_num,
+                    "chunk_text": chunk
+                })
+    elif file.type in [
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "application/vnd.ms-excel",
+    ]:
+        cells = extract_text_from_excel(file)
+        for cell_id, text in cells:
+            cell_chunks = chunk_text(text, max_length=500)
+            for chunk in cell_chunks:
+                chunks.append({
+                    "file_name": file.name,
+                    "document_id": str(uuid.uuid4()),
+                    "file_type": "xlsx",
+                    "cell_id": cell_id,
+                    "chunk_text": chunk
+                })
+    elif file.type == "text/plain":
+        lines = extract_text_from_txt(file)
+        for line_num, text in lines:
+            line_chunks = chunk_text(text, max_length=500)
+            for chunk in line_chunks:
+                chunks.append({
+                    "file_name": file.name,
+                    "document_id": str(uuid.uuid4()),
+                    "file_type": "txt",
+                    "line_number": line_num,
+                    "chunk_text": chunk
+                })
     else:
         st.warning(f"Unsupported file type: {file.type}")
         logger.warning(f"Unsupported file type: {file.type}")
@@ -273,7 +410,7 @@ def chunk_text(text: str, max_length: int = 500) -> List[str]:
     Example:
         chunks = chunk_text("Your long text here.", max_length=500)
     """
-    sentences = text.split('.')
+    sentences = re.split(r'(?<=[.!?])\s+', text)
     chunks = []
     current_chunk = ""
     for sentence in sentences:
@@ -281,7 +418,7 @@ def chunk_text(text: str, max_length: int = 500) -> List[str]:
         if not sentence:
             continue
         if len(current_chunk) + len(sentence) + 1 <= max_length:
-            current_chunk += f". {sentence}"
+            current_chunk += f" {sentence}"
         else:
             if current_chunk:
                 chunks.append(current_chunk.strip())
@@ -342,6 +479,12 @@ def store_document(chunk: Dict):
         payload["page_number"] = chunk.get("page_number", "N/A")
     elif chunk["file_type"] == "docx":
         payload["paragraph_number"] = chunk.get("paragraph_number", "N/A")
+    elif chunk["file_type"] == "pptx":
+        payload["slide_number"] = chunk.get("slide_number", "N/A")
+    elif chunk["file_type"] == "xlsx":
+        payload["cell_id"] = chunk.get("cell_id", "N/A")
+    elif chunk["file_type"] == "txt":
+        payload["line_number"] = chunk.get("line_number", "N/A")
     payload["chunk_text"] = chunk["chunk_text"]
 
     # Use a single UUID for point ID
@@ -403,6 +546,9 @@ def get_file_icon(file_type: str) -> str:
     icons = {
         "pdf": "📄",
         "docx": "📃",
+        "pptx": "📊",
+        "xlsx": "📈",
+        "txt": "📝",
         "default": "📄"
     }
     return icons.get(file_type, icons["default"])
@@ -452,11 +598,48 @@ def get_thumbnail(file_type: str, file: io.BytesIO) -> bytes:
     """
     if file_type == "pdf":
         return generate_pdf_thumbnail(file)
-    elif file_type == "docx":
-        # For DOCX, you can implement similar logic or return a default icon
+    elif file_type == "pptx":
+        # For PPTX, you can implement similar logic or return a default icon
         return None
     else:
         return None
+
+def generate_answer(query: str, context_chunks: List[str]) -> str:
+    """
+    Generates an answer to the user's query based on the context chunks.
+
+    Args:
+        query (str): The user's question.
+        context_chunks (List[str]): List of text chunks from retrieved documents.
+
+    Returns:
+        str: The generated answer.
+
+    Example:
+        answer = generate_answer("What is AI?", ["AI stands for...", "It is used in..."])
+    """
+    try:
+        # Combine context chunks into a single context string
+        context = "\n\n".join(context_chunks)
+        # Create a prompt for the language model
+        prompt = f"Answer the following question based on the provided context:\n\nContext:\n{context}\n\nQuestion: {query}\n\nAnswer:"
+        # Use OpenAI's API to generate an answer
+        response = openai.ChatCompletion.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": "You are an AI assistant that provides helpful, concise answers based on the provided context."},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=200,
+            temperature=0.7,
+        )
+        answer = response.choices[0].message.content.strip()
+        logger.info("Generated answer using OpenAI API.")
+        return answer
+    except Exception as e:
+        st.error(f"Failed to generate answer: {e}")
+        logger.error(f"Failed to generate answer: {e}")
+        return "I'm sorry, I couldn't generate an answer at this time."
 
 # =========================
 # Streamlit Application
@@ -486,7 +669,7 @@ def main():
     # =========================
     st.sidebar.header("📂 Upload Documents")
     uploaded_files = st.sidebar.file_uploader(
-        "Choose PDF or DOCX files", type=["pdf", "docx"], accept_multiple_files=True
+        "Choose files", type=["pdf", "docx", "xlsx", "pptx", "txt"], accept_multiple_files=True
     )
 
     if uploaded_files:
@@ -503,7 +686,7 @@ def main():
                 store_document(chunk)
 
     st.sidebar.markdown("---")
-    st.sidebar.info("Upload PDF or DOCX files to index them for searching.")
+    st.sidebar.info("Upload PDF, DOCX, XLSX, PPTX, or TXT files to index them for searching.")
 
     # =========================
     # Main Section: Querying
@@ -532,6 +715,7 @@ def main():
                         st.info("No similar documents found.")
                     else:
                         st.success(f"Found {len(results)} similar document(s):")
+                        context_chunks = []
                         for idx, result in enumerate(results, start=1):
                             payload = result.payload
                             file_name = payload.get("file_name", "Unknown")
@@ -540,10 +724,16 @@ def main():
                             chunk_text = payload.get("chunk_text", "")
                             page_number = payload.get("page_number", None)
                             paragraph_number = payload.get("paragraph_number", None)
+                            slide_number = payload.get("slide_number", None)
+                            cell_id = payload.get("cell_id", None)
+                            line_number = payload.get("line_number", None)
                             score = result.score
                             thumbnail = payload.get("thumbnail", None)
 
                             icon = get_file_icon(file_type)
+
+                            # Collect context chunks for answer generation
+                            context_chunks.append(chunk_text)
 
                             # Display result with icon and metadata
                             with st.container():
@@ -562,9 +752,21 @@ def main():
                                         st.markdown(f"**Page Number**: {page_number}")
                                     if file_type == "docx" and paragraph_number:
                                         st.markdown(f"**Paragraph Number**: {paragraph_number}")
+                                    if file_type == "pptx" and slide_number:
+                                        st.markdown(f"**Slide Number**: {slide_number}")
+                                    if file_type == "xlsx" and cell_id:
+                                        st.markdown(f"**Cell ID**: {cell_id}")
+                                    if file_type == "txt" and line_number:
+                                        st.markdown(f"**Line Number**: {line_number}")
                                     st.markdown(f"**Similarity Score**: {score:.4f}")
                                     st.markdown(f"**Snippet**: {chunk_text[:200]}...")  # Display first 200 chars
                                 st.markdown("---")
+
+                        # Generate an answer based on the retrieved context
+                        with st.spinner("Generating answer..."):
+                            answer = generate_answer(user_query, context_chunks)
+                            st.header("📝 Answer")
+                            st.write(answer)
 
     st.markdown("---")
     st.markdown("Developed with ❤️ using Streamlit and Qdrant Cloud.")
