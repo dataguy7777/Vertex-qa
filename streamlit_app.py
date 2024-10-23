@@ -14,8 +14,8 @@ from qdrant_client.models import (
 from pdfminer.high_level import extract_text_to_fp
 from pdfminer.layout import LAParams
 from docx import Document
-from pptx import Presentation  # Added for PPTX support
-import pandas as pd  # Added for Excel support
+from pptx import Presentation  # For PPTX support
+import pandas as pd  # For Excel support
 from sentence_transformers import SentenceTransformer
 import numpy as np
 import tempfile
@@ -24,8 +24,8 @@ import logging
 from pdf2image import convert_from_bytes
 from PIL import Image
 import base64
-import openai  # Added for OpenAI API
 import re
+from transformers import pipeline, AutoModelForSeq2SeqLM, AutoTokenizer
 
 # =========================
 # Logging Configuration
@@ -66,19 +66,15 @@ st.set_page_config(
 
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
 QDRANT_URL = os.getenv("QDRANT_URL")  # e.g., "https://your-instance.qdrant.io"
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # Added for OpenAI API
 
 # =========================
 # Validate Environment Variables
 # =========================
 
-if not all([QDRANT_API_KEY, QDRANT_URL, OPENAI_API_KEY]):
-    st.error("Please ensure that QDRANT_API_KEY, QDRANT_URL, and OPENAI_API_KEY are set in the .env file.")
-    logger.error("Missing QDRANT_API_KEY, QDRANT_URL, or OPENAI_API_KEY in .env file.")
+if not all([QDRANT_API_KEY, QDRANT_URL]):
+    st.error("Please ensure that QDRANT_API_KEY and QDRANT_URL are set in the .env file.")
+    logger.error("Missing QDRANT_API_KEY or QDRANT_URL in .env file.")
     st.stop()
-
-# Initialize OpenAI API
-openai.api_key = OPENAI_API_KEY
 
 # =========================
 # Initialize Qdrant Client
@@ -124,6 +120,32 @@ def load_embedding_model():
         st.stop()
 
 embedding_model = load_embedding_model()
+
+# =========================
+# Initialize Open-Source LLM
+# =========================
+
+@st.cache_resource
+def load_llm_pipeline():
+    """
+    Loads the pre-trained open-source LLM pipeline for answer generation.
+
+    Returns:
+        transformers.Pipeline: The loaded LLM pipeline.
+    """
+    try:
+        model_name = "google/flan-t5-base"  # You can choose other models like "EleutherAI/gpt-j-6B"
+        tokenizer = AutoTokenizer.from_pretrained(model_name)
+        model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
+        llm_pipeline = pipeline("text2text-generation", model=model, tokenizer=tokenizer)
+        logger.info(f"Loaded LLM model: {model_name}")
+        return llm_pipeline
+    except Exception as e:
+        st.error(f"Failed to load LLM model: {e}")
+        logger.error(f"Failed to load LLM model: {e}")
+        st.stop()
+
+llm_pipeline = load_llm_pipeline()
 
 # =========================
 # Utility Functions
@@ -398,7 +420,7 @@ def extract_text_from_file(file) -> List[Dict]:
 
 def chunk_text(text: str, max_length: int = 500) -> List[str]:
     """
-    Splits text into chunks based on periods, ensuring each chunk does not exceed max_length.
+    Splits text into chunks based on sentence delimiters, ensuring each chunk does not exceed max_length.
 
     Args:
         text (str): The input text to split.
@@ -606,7 +628,7 @@ def get_thumbnail(file_type: str, file: io.BytesIO) -> bytes:
 
 def generate_answer(query: str, context_chunks: List[str]) -> str:
     """
-    Generates an answer to the user's query based on the context chunks.
+    Generates an answer to the user's query based on the context chunks using an open-source LLM.
 
     Args:
         query (str): The user's question.
@@ -623,18 +645,10 @@ def generate_answer(query: str, context_chunks: List[str]) -> str:
         context = "\n\n".join(context_chunks)
         # Create a prompt for the language model
         prompt = f"Answer the following question based on the provided context:\n\nContext:\n{context}\n\nQuestion: {query}\n\nAnswer:"
-        # Use OpenAI's API to generate an answer
-        response = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": "system", "content": "You are an AI assistant that provides helpful, concise answers based on the provided context."},
-                {"role": "user", "content": prompt}
-            ],
-            max_tokens=200,
-            temperature=0.7,
-        )
-        answer = response.choices[0].message.content.strip()
-        logger.info("Generated answer using OpenAI API.")
+        # Use the open-source LLM pipeline to generate an answer
+        response = llm_pipeline(prompt, max_length=200, num_return_sequences=1)
+        answer = response[0]['generated_text'].strip()
+        logger.info("Generated answer using open-source LLM.")
         return answer
     except Exception as e:
         st.error(f"Failed to generate answer: {e}")
