@@ -134,7 +134,7 @@ def load_llm_pipeline():
         transformers.Pipeline: The loaded LLM pipeline.
     """
     try:
-        model_name = "google/flan-t5-base"  # You can choose other models like "EleutherAI/gpt-j-6B"
+        model_name = "google/flan-t5-base"  # Small yet capable model
         tokenizer = AutoTokenizer.from_pretrained(model_name)
         model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
         llm_pipeline = pipeline("text2text-generation", model=model, tokenizer=tokenizer)
@@ -646,7 +646,7 @@ def generate_answer(query: str, context_chunks: List[str]) -> str:
         # Structure the prompt as per the user's requirement
         prompt = f"The info found in documents collected explain that:\n\n{context}\n\nQuestion: {query}\n\nAnswer:"
         # Use the open-source LLM pipeline to generate an answer
-        response = llm_pipeline(prompt, max_length=200, num_return_sequences=1)
+        response = llm_pipeline(prompt, max_length=300, num_return_sequences=1, temperature=0.7)
         answer = response[0]['generated_text'].strip()
         logger.info("Generated answer using open-source LLM.")
         return answer
