@@ -3,6 +3,8 @@ qdrant-client  # Recommended version: 1.2.0
 python-dotenv  # Recommended version: 1.0.0
 pdfminer.six  # Recommended version: 20221105
 python-docx  # Recommended version: 0.8.11
+python-pptx  # Recommended version: 0.6.21
+pandas  # Recommended version: 1.5.3
 sentence-transformers  # Recommended version: 2.2.2
 numpy  # Recommended version: 1.24.3
 torch  # Recommended version: 2.0.1
@@ -10,3 +12,4 @@ pdf2image  # Recommended version: 1.16.3
 Pillow  # Recommended version: 9.5.0
 plotly  # Recommended version: 5.15.0
 scikit-learn  # Recommended version: 1.2.2
+openai  # Recommended version: 0.27.8
