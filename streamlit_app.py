@@ -4,8 +4,8 @@ import streamlit as st
 import uuid
 from typing import List, Dict
 from embeddings import load_embedding_model, generate_embedding
-from qdrant_client_module import initialize_qdrant_collection, store_document, query_similar_documents
-from llm import load_llm_pipeline, generate_answer
+from qdrant_client import initialize_qdrant_collection, store_document, query_similar_documents
+from llm import generate_answer
 from utils import extract_text_from_file, get_file_icon, get_thumbnail
 from logger import logger
 
@@ -24,7 +24,7 @@ st.set_page_config(
 # =========================
 
 # Initialize Qdrant collection
-initialize_qdrant_collection()
+qdrant_client = initialize_qdrant_collection()
 
 # App Title
 st.title("📄 Retrieval-Augmented Generation (RAG) App with Qdrant Cloud")
@@ -48,7 +48,7 @@ if uploaded_files:
 
         # Store each chunk in Qdrant
         for chunk in chunks:
-            store_document(chunk)
+            store_document(qdrant_client, chunk)
 
 st.sidebar.markdown("---")
 st.sidebar.info("Upload PDF, DOCX, XLSX, PPTX, or TXT files to index them for searching.")
@@ -74,7 +74,7 @@ if st.button("Search"):
                 st.error("Failed to generate embedding for the query.")
             else:
                 # Query Qdrant for similar documents
-                results = query_similar_documents(query_embedding, top_k=5)
+                results = query_similar_documents(qdrant_client, query_embedding, top_k=5)
 
                 if not results:
                     st.info("No similar documents found.")
