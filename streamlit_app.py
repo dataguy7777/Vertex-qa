@@ -643,8 +643,8 @@ def generate_answer(query: str, context_chunks: List[str]) -> str:
     try:
         # Combine context chunks into a single context string
         context = "\n\n".join(context_chunks)
-        # Create a prompt for the language model
-        prompt = f"Answer the following question based on the provided context:\n\nContext:\n{context}\n\nQuestion: {query}\n\nAnswer:"
+        # Structure the prompt as per the user's requirement
+        prompt = f"The info found in documents collected explain that:\n\n{context}\n\nQuestion: {query}\n\nAnswer:"
         # Use the open-source LLM pipeline to generate an answer
         response = llm_pipeline(prompt, max_length=200, num_return_sequences=1)
         answer = response[0]['generated_text'].strip()
