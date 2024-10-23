@@ -17,7 +17,11 @@ def load_llm():
     """
     try:
         tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-        model = AutoModelForCausalLM.from_pretrained(MODEL_NAME, device_map="auto", torch_dtype=torch.float16 if DEVICE == "cuda" else torch.float32)
+        model = AutoModelForCausalLM.from_pretrained(
+            MODEL_NAME,
+            device_map="auto",
+            torch_dtype=torch.float16 if DEVICE == "cuda" else torch.float32
+        )
         model.to(DEVICE)
         logger.info(f"Loaded LLM model: {MODEL_NAME} on {DEVICE}")
         return model, tokenizer
