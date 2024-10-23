@@ -4,7 +4,7 @@ import streamlit as st
 import uuid
 from typing import List, Dict
 from embeddings import load_embedding_model, generate_embedding
-from qdrant_client import initialize_qdrant_collection, store_document, query_similar_documents
+from qdrant_utils import initialize_qdrant_collection, store_document, query_similar_documents
 from llm import generate_answer
 from utils import extract_text_from_file, get_file_icon, get_thumbnail
 from logger import logger
