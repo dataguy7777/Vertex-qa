@@ -5,6 +5,10 @@ import torch
 from typing import List
 from logger import logger
 import streamlit as st
+from langchain import LLMChain, PromptTemplate
+from langchain.agents import initialize_agent, Tool, AgentType
+from langchain.llms import HuggingFacePipeline
+from langchain.callbacks import get_openai_callback
 
 # Constants
 MODEL_NAME = "EleutherAI/gpt-j-6B"  # More powerful open-source LLM
@@ -32,9 +36,62 @@ def load_llm():
 
 model, tokenizer = load_llm()
 
+def get_llm_chain():
+    """
+    Sets up the LangChain LLM pipeline with GPT-J-6B.
+    """
+    try:
+        pipe = torch.pipeline(
+            "text-generation",
+            model=model,
+            tokenizer=tokenizer,
+            device=0 if DEVICE == "cuda" else -1,
+            max_length=512,
+            temperature=0.7,
+            top_p=0.9,
+            repetition_penalty=1.2,
+        )
+        llm = HuggingFacePipeline(pipeline=pipe)
+        logger.info("Initialized LangChain LLM pipeline.")
+        return llm
+    except Exception as e:
+        st.error(f"Failed to initialize LLM pipeline: {e}")
+        logger.error(f"Failed to initialize LLM pipeline: {e}")
+        st.stop()
+
+llm = get_llm_chain()
+
+# Define the prompt template
+prompt_template = """
+The information found in the documents collected explains that:
+
+{context}
+
+Question: {question}
+
+Answer:
+"""
+
+# Initialize the PromptTemplate
+template = PromptTemplate(
+    input_variables=["context", "question"],
+    template=prompt_template,
+)
+
+# Initialize the LLM Chain
+llm_chain = LLMChain(llm=llm, prompt=template)
+
+# Initialize the agent with the LLM chain
+agent = initialize_agent(
+    tools=[],  # No additional tools for now
+    llm=llm_chain,
+    agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
+    verbose=True,
+)
+
 def generate_answer(query: str, context_chunks: List[str]) -> str:
     """
-    Generates an answer to the user's query based on the context chunks using GPT-J-6B.
+    Generates an answer to the user's query based on the context chunks using an agent.
 
     Args:
         query (str): The user's question.
@@ -47,30 +104,14 @@ def generate_answer(query: str, context_chunks: List[str]) -> str:
         # Combine context chunks into a single context string
         context = "\n\n".join(context_chunks)
         
-        # Structure the prompt as per the user's requirement
-        prompt = f"The information found in the documents collected explains that:\n\n{context}\n\nQuestion: {query}\n\nAnswer:"
-
-        inputs = tokenizer.encode(prompt, return_tensors="pt").to(DEVICE)
-
-        # Generate response
-        outputs = model.generate(
-            inputs,
-            max_length=512,
-            temperature=0.7,
-            top_p=0.9,
-            do_sample=True,
-            num_return_sequences=1,
-            eos_token_id=tokenizer.eos_token_id,
-        )
-
-        answer = tokenizer.decode(outputs[0], skip_special_tokens=True)
-
-        # Post-process the answer to match desired format
-        if "Answer:" in answer:
-            answer = answer.split("Answer:")[-1].strip()
-
-        logger.info("Generated answer using GPT-J-6B.")
-        return f"📝 **Answer**\n\n{answer}"
+        # Use the agent to generate the answer
+        with get_openai_callback() as cb:
+            response = agent.run({"context": context, "question": query})
+        
+        # Format the answer
+        answer = f"📝 **Answer**\n\n{response}"
+        logger.info("Generated answer using LangChain agent with GPT-J-6B.")
+        return answer
     except Exception as e:
         st.error(f"Failed to generate answer: {e}")
         logger.error(f"Failed to generate answer: {e}")
