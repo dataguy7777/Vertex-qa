@@ -13,6 +13,7 @@ from pdf2image import convert_from_bytes
 from PIL import Image
 from logger import logger
 import streamlit as st
+import uuid
 
 def extract_text_from_pdf(file: io.BytesIO) -> List[Tuple[int, str]]:
     """
